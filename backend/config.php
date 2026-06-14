@@ -22,7 +22,7 @@ return [
         'db'  => env_value('MONGODB_DB', 'oil_management_system'),
     ],
 
-    'jwt_secret' => env_value('JWT_SECRET', 'CHANGE_THIS_SECRET_FOR_LOCAL_ONLY'),
+    'jwt_secret' => env_value('JWT_SECRET', 'd6bed3a2b0587f7e1f69c377760fc7b4'),
     'jwt_expire_seconds' => 60 * 60 * 24 * 7,
     'upload_max_mb' => 5,
 
