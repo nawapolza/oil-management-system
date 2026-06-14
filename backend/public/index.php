@@ -13,7 +13,7 @@ foreach ($autoloadCandidates as $autoload) {
     }
 }
 
-if (!class_exists(MongoDB\Client::class)) {
+if (!class_exists(MongoDB\Client::class)) { 
     http_response_code(500);
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode([
@@ -56,10 +56,33 @@ function json_response($data, int $status = 200): void
 
 function get_mongo_db(array $config): Database
 {
-    $mongo = $config['mongo'] ?? [];
-    $uri = $mongo['uri'] ?? getenv('MONGODB_URI') ?: 'mongodb://127.0.0.1:27017';
-    $dbName = $mongo['db'] ?? getenv('MONGODB_DB') ?: 'oil_management_system';
-    $client = new Client($uri);
+    // รองรับ config.php ที่ใช้ key เป็น mongodb และยังกัน fallback ของเดิมไว้ด้วย
+    $mongo = $config['mongodb'] ?? $config['mongo'] ?? [];
+
+    $uri = $mongo['uri']
+        ?? getenv('MONGODB_URI')
+        ?? getenv('MONGODB')
+        ?? '';
+
+    $dbName = $mongo['db']
+        ?? getenv('MONGODB_DB')
+        ?? 'oil_management_system';
+
+    $uri = preg_replace('/\s+/', '', trim((string)$uri));
+    $dbName = trim((string)$dbName);
+
+    if ($uri === '') {
+        throw new RuntimeException('MONGODB_URI is not set');
+    }
+
+    if ($dbName === '') {
+        throw new RuntimeException('MONGODB_DB is not set');
+    }
+
+    $client = new Client($uri, [], [
+        'serverSelectionTimeoutMS' => 5000,
+    ]);
+
     return $client->selectDatabase($dbName);
 }
 
@@ -471,6 +494,18 @@ try {
     $db = get_mongo_db($config);
     $path = normalize_path();
     $method = $_SERVER['REQUEST_METHOD'];
+
+    if ($path === '/health' && $method === 'GET') {
+        $db->command(['ping' => 1]);
+
+        json_response([
+            'success' => true,
+            'message' => 'Backend connected to MongoDB successfully',
+            'database' => $config['mongodb']['db'] ?? $config['mongo']['db'] ?? getenv('MONGODB_DB') ?: 'oil_management_system',
+            'route' => $path,
+            'time' => date('c'),
+        ]);
+    }
 
     if ($path === '/' && $method === 'GET') {
         json_response([
