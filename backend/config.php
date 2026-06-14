@@ -18,11 +18,11 @@ $extraOrigins = $frontendOrigins
 
 return [
     'mongodb' => [
-        'uri' => env_value('MONGODB_URI'),
+        'uri' => env_value('MONGODB_URI', ''),
         'db'  => env_value('MONGODB_DB', 'oil_management_system'),
     ],
 
-    'jwt_secret' => env_value('JWT_SECRET', 'd6bed3a2b0587f7e1f69c377760fc7b4'),
+    'jwt_secret' => env_value('JWT_SECRET', 'CHANGE_THIS_SECRET_FOR_PRODUCTION'),
     'jwt_expire_seconds' => 60 * 60 * 24 * 7,
     'upload_max_mb' => 5,
 
@@ -32,10 +32,10 @@ return [
         'http://localhost',
         'http://127.0.0.1',
 
-        // ใส่ URL frontend จริงของที่รักบน Render
+        // Frontend Render
         'https://oil-management-system.onrender.com',
 
-        // ใส่ backend ไว้ได้ ไม่เสียหาย
+        // Backend Render
         'https://oil-management-backend.onrender.com',
     ], $extraOrigins))),
 ];
