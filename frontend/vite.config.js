@@ -6,6 +6,11 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
+
+    allowedHosts: [
+      'oil-management-system.onrender.com'
+    ],
+
     proxy: {
       '/api': {
         target: 'http://localhost/oil-management-system/backend/public/index.php',
@@ -16,6 +21,7 @@ export default defineConfig({
           return `?route=/${route}`
         },
       },
+
       '/uploads': {
         target: 'http://localhost/oil-management-system/backend/public',
         changeOrigin: true,
