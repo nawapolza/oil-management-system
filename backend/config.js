@@ -24,7 +24,7 @@ module.exports = {
     uri: envValue('MONGODB_URI', ''),
     db: envValue('MONGODB_DB', 'oil_management_system'),
   },
-  jwtSecret: envValue('JWT_SECRET', 'CHANGE_THIS_SECRET_FOR_PRODUCTION'),
+  jwtSecret: envValue('JWT_SECRET', '4b9b89629ed5b3b6b9bb876821aaab38'),
   jwtExpireSeconds: intValue('JWT_EXPIRE_SECONDS', 60 * 60 * 24 * 7),
   uploadMaxMb: intValue('UPLOAD_MAX_MB', 5),
   corsAllowAll: envValue('CORS_ALLOW_ALL', 'true') === 'true',
