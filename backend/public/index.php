@@ -13,7 +13,7 @@ foreach ($autoloadCandidates as $autoload) {
     }
 }
 
-if (!class_exists(MongoDB\Client::class)) { 
+if (!class_exists(MongoDB\Client::class)) {
     http_response_code(500);
     header('Content-Type: application/json; charset=utf-8');
     echo json_encode([
@@ -56,30 +56,21 @@ function json_response($data, int $status = 200): void
 
 function get_mongo_db(array $config): Database
 {
-    // รองรับ config.php ที่ใช้ key เป็น mongodb และยังกัน fallback ของเดิมไว้ด้วย
-    $mongo = $config['mongodb'] ?? $config['mongo'] ?? [];
+    // รองรับ config.php แบบใหม่ที่ใช้ key ชื่อ mongodb และยังรองรับของเก่า mongo
+    $mongo = $config['mongodb'] ?? ($config['mongo'] ?? []);
 
-    $uri = $mongo['uri']
-        ?? getenv('MONGODB_URI')
-        ?? getenv('MONGODB')
-        ?? '';
+    // บน Render ให้ ENV มาก่อนเสมอ
+    $uri = getenv('MONGODB_URI') ?: ($mongo['uri'] ?? '');
+    $dbName = getenv('MONGODB_DB') ?: ($mongo['db'] ?? 'oil_management_system');
 
-    $dbName = $mongo['db']
-        ?? getenv('MONGODB_DB')
-        ?? 'oil_management_system';
-
-    $uri = preg_replace('/\s+/', '', trim((string)$uri));
-    $dbName = trim((string)$dbName);
-
-    if ($uri === '') {
+    if (!$uri) {
         throw new RuntimeException('MONGODB_URI is not set');
     }
-
-    if ($dbName === '') {
+    if (!$dbName) {
         throw new RuntimeException('MONGODB_DB is not set');
     }
 
-    $client = new Client($uri, [], [
+    $client = new Client($uri, [
         'serverSelectionTimeoutMS' => 5000,
     ]);
 
@@ -290,6 +281,17 @@ function normalize_path(): string
         }
     }
 
+    // กันกรณี path หลุดมาพร้อม query string เช่น /index.php?route=/health
+    if (str_contains($path, '?')) {
+        $queryPart = parse_url($path, PHP_URL_QUERY);
+        parse_str((string)$queryPart, $queryParams);
+        if (!empty($queryParams['route'])) {
+            $path = '/' . trim((string)$queryParams['route'], '/');
+        } else {
+            $path = parse_url($path, PHP_URL_PATH) ?: $path;
+        }
+    }
+
     if (starts_with_safe($path, '/api/')) {
         $path = substr($path, 4);
     } elseif ($path === '/api') {
@@ -491,17 +493,30 @@ function group_sum(array $rows, string $key, string $sumField, int $limit = 0): 
 }
 
 try {
-    $db = get_mongo_db($config);
     $path = normalize_path();
     $method = $_SERVER['REQUEST_METHOD'];
 
+    // ใช้เช็กก่อนว่า Render deploy ไฟล์ index.php ตัวนี้จริงหรือยัง โดยไม่ต้องต่อ DB
+    if ($path === '/ping' && $method === 'GET') {
+        json_response([
+            'success' => true,
+            'message' => 'pong',
+            'build' => 'index-render-fixed-v3',
+            'route' => $path,
+            'time' => date('c'),
+        ]);
+    }
+
+    $db = get_mongo_db($config);
+
+    // ใช้เช็กว่าต่อ MongoDB Atlas ได้จริง
     if ($path === '/health' && $method === 'GET') {
         $db->command(['ping' => 1]);
-
         json_response([
             'success' => true,
             'message' => 'Backend connected to MongoDB successfully',
-            'database' => $config['mongodb']['db'] ?? $config['mongo']['db'] ?? getenv('MONGODB_DB') ?: 'oil_management_system',
+            'build' => 'index-render-fixed-v3',
+            'database' => getenv('MONGODB_DB') ?: (($config['mongodb']['db'] ?? null) ?: ($config['mongo']['db'] ?? 'oil_management_system')),
             'route' => $path,
             'time' => date('c'),
         ]);
@@ -511,8 +526,9 @@ try {
         json_response([
             'success' => true,
             'name' => 'OilOps PHP API MongoDB',
+            'build' => 'index-render-fixed-v3',
             'time' => date('c'),
-            'endpoints' => ['/auth/login', '/auth/me', '/deliveries', '/dashboard/stats', '/notifications', '/users', '/vehicles'],
+            'endpoints' => ['/ping', '/health', '/auth/login', '/auth/me', '/deliveries', '/dashboard/stats', '/notifications', '/users', '/vehicles'],
         ]);
     }
 
