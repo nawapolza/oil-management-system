@@ -8,14 +8,17 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 5173,
 
-    allowedHosts: true,
+    allowedHosts: [
+      'oil-management-system.onrender.com',
+      'localhost',
+      '127.0.0.1',
+    ],
 
     proxy: {
       '/api': {
         target: 'http://localhost/oil-management-system/backend/public/index.php',
         changeOrigin: true,
         secure: false,
-
         rewrite: (path) => {
           const route = path.replace(/^\/api\/?/, '')
           return `?route=/${route}`
@@ -28,5 +31,15 @@ export default defineConfig({
         secure: false,
       },
     },
+  },
+
+  preview: {
+    host: '0.0.0.0',
+    port: 10000,
+    allowedHosts: [
+      'oil-management-system.onrender.com',
+      'localhost',
+      '127.0.0.1',
+    ],
   },
 })
