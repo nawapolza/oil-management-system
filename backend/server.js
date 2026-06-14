@@ -12,6 +12,7 @@ const { MongoClient, ObjectId } = require('mongodb');
 const config = require('./config');
 
 const app = express();
+
 const uploadDir = path.join(__dirname, 'public', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -55,14 +56,15 @@ function safeRegex(text) {
 }
 
 function val(data, key, defaultValue = null) {
-  return Object.prototype.hasOwnProperty.call(data, key) ? data[key] : defaultValue;
+  return Object.prototype.hasOwnProperty.call(data || {}, key) ? data[key] : defaultValue;
 }
 
 function mongoToPlain(value) {
+  if (!value) return value;
   if (value instanceof ObjectId) return value.toString();
   if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map((item) => mongoToPlain(item));
-  if (value && typeof value === 'object') {
+  if (typeof value === 'object') {
     const out = {};
     for (const [key, item] of Object.entries(value)) {
       if (key === '_id') {
@@ -80,13 +82,53 @@ function publicUser(user) {
   if (!user) return null;
   const out = mongoToPlain(user);
   delete out.password_hash;
+  delete out.password;
   return out;
 }
 
+function parseCookieHeader(cookieHeader) {
+  const cookies = {};
+  if (!cookieHeader) return cookies;
+  String(cookieHeader).split(';').forEach((part) => {
+    const index = part.indexOf('=');
+    if (index === -1) return;
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (key) cookies[key] = decodeURIComponent(value);
+  });
+  return cookies;
+}
+
 function getBearerToken(req) {
-  const header = req.headers.authorization || '';
-  const match = header.match(/Bearer\s+(.+)$/i);
-  return match ? match[1].trim() : null;
+  const authHeader = req.headers.authorization || req.headers.Authorization || '';
+  const match = String(authHeader).match(/^Bearer\s+(.+)$/i);
+  if (match) return match[1].trim();
+
+  const xAccessToken = req.headers['x-access-token'];
+  if (xAccessToken) return String(xAccessToken).trim();
+
+  const cookies = parseCookieHeader(req.headers.cookie);
+  if (cookies.token) return cookies.token;
+  if (cookies.accessToken) return cookies.accessToken;
+
+  if (req.query && req.query.token) return String(req.query.token).trim();
+
+  return null;
+}
+
+function signUserToken(user) {
+  const id = String(user.id || user._id || '');
+  return jwt.sign(
+    {
+      sub: id,
+      id,
+      user_id: id,
+      role: user.role || 'employee',
+      username: user.username || '',
+    },
+    config.jwtSecret,
+    { expiresIn: Number(config.jwtExpireSeconds || 60 * 60 * 24 * 7) }
+  );
 }
 
 async function ensureIndexes(db) {
@@ -101,12 +143,15 @@ async function ensureIndexes(db) {
 
 async function getDb() {
   if (mongoDb) return mongoDb;
+
   if (!config.mongodb.uri) {
     throw new Error('MONGODB_URI is not set');
   }
+
   mongoClient = new MongoClient(config.mongodb.uri, {
-    serverSelectionTimeoutMS: 5000,
+    serverSelectionTimeoutMS: 10000,
   });
+
   await mongoClient.connect();
   mongoDb = mongoClient.db(config.mongodb.db);
   await ensureIndexes(mongoDb);
@@ -128,13 +173,25 @@ async function currentUser(req) {
     return null;
   }
 
-  const oid = oidOrNull(payload.sub);
-  if (!oid) return null;
+  const possibleId = payload.sub || payload.id || payload.user_id || payload.uid;
+  const oid = oidOrNull(possibleId);
 
-  const user = await req.db.collection('users').findOne(
-    { _id: oid, is_active: 1 },
-    { projection: { password_hash: 0 } }
-  );
+  let user = null;
+
+  if (oid) {
+    user = await req.db.collection('users').findOne(
+      { _id: oid, is_active: 1 },
+      { projection: { password_hash: 0, password: 0 } }
+    );
+  }
+
+  if (!user && payload.username) {
+    user = await req.db.collection('users').findOne(
+      { username: String(payload.username), is_active: 1 },
+      { projection: { password_hash: 0, password: 0 } }
+    );
+  }
+
   return publicUser(user);
 }
 
@@ -159,7 +216,7 @@ async function findUserPublic(db, id) {
   if (!oid) return null;
   const user = await db.collection('users').findOne(
     { _id: oid },
-    { projection: { password_hash: 0 } }
+    { projection: { password_hash: 0, password: 0 } }
   );
   return publicUser(user);
 }
@@ -209,17 +266,21 @@ async function resolveVehicleId(db, user, data) {
     created_at: nowIso(),
     updated_at: nowIso(),
   });
+
   return String(result.insertedId);
 }
 
 async function createAutoNotifications(db, deliveryId, data) {
   const alerts = [];
+
   if (Number(data.quantity_liters || 0) >= 280) {
     alerts.push(['ปริมาณน้ำมันสูงผิดปกติ', 'รายการนี้มีปริมาณน้ำมันตั้งแต่ 280 ลิตรขึ้นไป กรุณาตรวจสอบ', 'danger']);
   }
+
   if ((data.payment_status || 'pending') === 'pending') {
     alerts.push(['ยังไม่จ่ายค่าแรง', 'รายการนี้ยังเป็นสถานะรอจ่าย', 'warning']);
   }
+
   if (!data.receipt_photo) {
     alerts.push(['ยังไม่แนบรูปบิล', 'รายการนี้ยังไม่มีรูปบิลหรือเอกสารแนบ', 'info']);
   }
@@ -268,13 +329,16 @@ async function buildDeliveryFilter(db, user, query) {
       if ((user.role || '') !== 'owner') {
         vehicleFilter.user_id = String(user.id);
       }
+
       const vehicles = await db.collection('vehicles')
         .find(vehicleFilter, { projection: { _id: 1 } })
         .toArray();
+
       const vehicleIds = vehicles.map((v) => String(v._id));
       if (vehicleIds.length) {
         or.push({ vehicle_id: { $in: vehicleIds } });
       }
+
       filter.$or = or;
     }
   }
@@ -301,7 +365,7 @@ async function enrichDelivery(db, delivery) {
   const fuelUsed = Number(d.fuel_used_liters || 0);
 
   d.price_per_liter = quantity > 0 ? Math.round((amount / quantity) * 100) / 100 : 0;
-  d.fuel_liters_per_100km = distance > 0 ? Math.round((fuelUsed / distance * 100) * 100) / 100 : 0;
+  d.fuel_liters_per_100km = distance > 0 ? Math.round(((fuelUsed / distance) * 100) * 100) / 100 : 0;
 
   return d;
 }
@@ -313,15 +377,18 @@ async function fetchEnrichedDeliveries(db, filter, options = {}) {
 
 function groupSum(rows, key, sumField, limit = 0) {
   const groups = new Map();
+
   for (const row of rows) {
     const name = String(row[key] || '').trim() || 'ไม่ระบุ';
     if (!groups.has(name)) {
       groups.set(name, { name, value: 0, trips: 0 });
     }
+
     const item = groups.get(name);
     item.value += Number(row[sumField] || 0);
     item.trips += 1;
   }
+
   const out = Array.from(groups.values()).sort((a, b) => b.value - a.value);
   return limit > 0 ? out.slice(0, limit) : out;
 }
@@ -342,7 +409,7 @@ const storage = multer.diskStorage({
 
 const uploadPhoto = multer({
   storage,
-  limits: { fileSize: config.uploadMaxMb * 1024 * 1024 },
+  limits: { fileSize: Number(config.uploadMaxMb || 5) * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const allowed = ['image/jpeg', 'image/png', 'image/webp'];
     if (!allowed.includes(file.mimetype)) {
@@ -357,18 +424,25 @@ app.disable('x-powered-by');
 app.use(cors({
   origin(origin, cb) {
     if (!origin) return cb(null, true);
-    if (config.corsAllowAll || config.corsAllowedOrigins.includes(origin)) return cb(null, true);
-    return cb(null, false);
+    if (config.corsAllowAll) return cb(null, true);
+    if (config.corsAllowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS blocked origin: ${origin}`));
   },
-  allowedHeaders: ['Authorization', 'Content-Type', 'X-Requested-With'],
+  credentials: true,
+  allowedHeaders: ['Authorization', 'Content-Type', 'X-Requested-With', 'X-Access-Token'],
+  exposedHeaders: ['Authorization'],
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  optionsSuccessStatus: 204,
 }));
+
+app.options('*', cors());
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(uploadDir));
+app.use('/public/uploads', express.static(uploadDir));
 
-// รองรับ frontend เก่าที่ยังยิงแบบ /index.php?route=/auth/login ชั่วคราว
+// รองรับ frontend เก่าที่ยังยิงแบบ /index.php?route=/auth/login
 app.use((req, _res, next) => {
   if (req.query && req.query.route) {
     const route = '/' + String(req.query.route).replace(/^\/+/, '');
@@ -378,6 +452,8 @@ app.use((req, _res, next) => {
     req.url = route + (qs ? `?${qs}` : '');
   } else if (req.url.startsWith('/index.php/')) {
     req.url = req.url.replace('/index.php', '') || '/';
+  } else if (req.url === '/index.php') {
+    req.url = '/';
   }
   next();
 });
@@ -386,7 +462,7 @@ app.get('/ping', (req, res) => {
   jsonResponse(res, {
     success: true,
     message: 'pong',
-    build: 'node-express-mongodb-v1',
+    build: 'node-express-mongodb-auth-fixed',
     route: req.path,
     time: nowIso(),
   });
@@ -404,29 +480,38 @@ router.get('/health', asyncHandler(async (req, res) => {
   jsonResponse(res, {
     success: true,
     message: 'Backend connected to MongoDB successfully',
-    build: 'node-express-mongodb-v1',
+    build: 'node-express-mongodb-auth-fixed',
     database: config.mongodb.db,
     route: req.path,
     time: nowIso(),
   });
 }));
 
-router.get('/', (req, res) => {
+router.get('/', (_req, res) => {
   jsonResponse(res, {
     success: true,
-    name: 'OilOps Node API MongoDB',
-    build: 'node-express-mongodb-v1',
+    name: 'Sarawut Oil Management API',
+    build: 'node-express-mongodb-auth-fixed',
     time: nowIso(),
-    endpoints: ['/ping', '/health', '/auth/login', '/auth/me', '/deliveries', '/dashboard/stats', '/notifications', '/users', '/vehicles'],
+    endpoints: [
+      '/ping',
+      '/health',
+      '/auth/login',
+      '/auth/me',
+      '/deliveries',
+      '/dashboard/stats',
+      '/notifications',
+      '/users',
+      '/vehicles',
+    ],
   });
 });
 
-router.get('/auth/login', (req, res) => {
+router.get('/auth/login', (_req, res) => {
   jsonResponse(res, {
     success: true,
     message: 'auth/login route found. Use POST with username and password to login.',
-    build: 'node-express-mongodb-v1',
-    route: req.path,
+    build: 'node-express-mongodb-auth-fixed',
   });
 });
 
@@ -439,23 +524,60 @@ router.post('/auth/login', asyncHandler(async (req, res) => {
   }
 
   const userDoc = await req.db.collection('users').findOne({ username, is_active: 1 });
-  const user = mongoToPlain(userDoc);
-  if (!user || !user.password_hash || !bcrypt.compareSync(password, user.password_hash)) {
+
+  if (!userDoc) {
     return jsonResponse(res, { success: false, message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' }, 401);
   }
 
-  const token = jwt.sign(
-    { sub: String(user.id), role: user.role },
-    config.jwtSecret,
-    { expiresIn: config.jwtExpireSeconds }
-  );
+  let passwordOk = false;
 
-  delete user.password_hash;
-  return jsonResponse(res, { success: true, token, user });
+  if (userDoc.password_hash) {
+    passwordOk = bcrypt.compareSync(password, userDoc.password_hash);
+  } else if (userDoc.password) {
+    passwordOk = String(userDoc.password) === password;
+
+    // ถ้าเคย import password เป็น plain text ให้แปลงเป็น hash อัตโนมัติ
+    if (passwordOk) {
+      await req.db.collection('users').updateOne(
+        { _id: userDoc._id },
+        {
+          $set: {
+            password_hash: bcrypt.hashSync(password, 10),
+            updated_at: nowIso(),
+          },
+          $unset: { password: '' },
+        }
+      );
+    }
+  }
+
+  if (!passwordOk) {
+    return jsonResponse(res, { success: false, message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' }, 401);
+  }
+
+  const user = publicUser(userDoc);
+  const token = signUserToken(user);
+
+  return jsonResponse(res, {
+    success: true,
+    message: 'เข้าสู่ระบบสำเร็จ',
+    token,
+    accessToken: token,
+    user,
+    data: {
+      token,
+      accessToken: token,
+      user,
+    },
+  });
 }));
 
 router.get('/auth/me', requireAuth, (req, res) => {
-  jsonResponse(res, { success: true, user: req.user });
+  jsonResponse(res, {
+    success: true,
+    user: req.user,
+    data: req.user,
+  });
 });
 
 router.get('/vehicles', requireAuth, asyncHandler(async (req, res) => {
@@ -483,6 +605,7 @@ router.get('/vehicles', requireAuth, asyncHandler(async (req, res) => {
 router.post('/vehicles', requireAuth, asyncHandler(async (req, res) => {
   const data = req.body || {};
   const plate = String(data.plate_no || '').trim();
+
   if (!plate) {
     return jsonResponse(res, { success: false, message: 'กรุณากรอกทะเบียนรถ' }, 422);
   }
@@ -490,7 +613,9 @@ router.post('/vehicles', requireAuth, asyncHandler(async (req, res) => {
   const vehicleUserId = (req.user.role || '') === 'owner'
     ? (data.user_id ? String(data.user_id) : null)
     : String(req.user.id);
-  const driverName = String(data.driver_name || '').trim() || ((req.user.role || '') === 'owner' ? null : (req.user.name || null));
+
+  const driverName = String(data.driver_name || '').trim()
+    || ((req.user.role || '') === 'owner' ? null : (req.user.name || null));
 
   const result = await req.db.collection('vehicles').insertOne({
     user_id: vehicleUserId,
@@ -508,7 +633,7 @@ router.post('/vehicles', requireAuth, asyncHandler(async (req, res) => {
 
 router.get('/users', requireAuth, requireOwner, asyncHandler(async (req, res) => {
   const rows = await req.db.collection('users')
-    .find({}, { sort: { created_at: -1 }, projection: { password_hash: 0 } })
+    .find({}, { sort: { created_at: -1 }, projection: { password_hash: 0, password: 0 } })
     .toArray();
 
   jsonResponse(res, { success: true, data: rows.map(mongoToPlain) });
@@ -546,6 +671,7 @@ router.post('/users', requireAuth, requireOwner, asyncHandler(async (req, res) =
 
 router.patch('/users/:id/toggle', requireAuth, requireOwner, asyncHandler(async (req, res) => {
   const id = String(req.params.id || '');
+
   if (id === String(req.user.id)) {
     return jsonResponse(res, { success: false, message: 'ไม่สามารถปิดใช้งานบัญชีตัวเองได้' }, 422);
   }
@@ -557,6 +683,7 @@ router.patch('/users/:id/toggle', requireAuth, requireOwner, asyncHandler(async 
   if (!target) return jsonResponse(res, { success: false, message: 'ไม่พบผู้ใช้' }, 404);
 
   const newStatus = Number(target.is_active ?? 1) === 1 ? 0 : 1;
+
   await req.db.collection('users').updateOne(
     { _id: oid },
     { $set: { is_active: newStatus, updated_at: nowIso() } }
@@ -568,10 +695,12 @@ router.patch('/users/:id/toggle', requireAuth, requireOwner, asyncHandler(async 
 router.get('/deliveries', requireAuth, asyncHandler(async (req, res) => {
   const filter = await buildDeliveryFilter(req.db, req.user, req.query);
   const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '100', 10), 1), 500);
+
   const rows = await fetchEnrichedDeliveries(req.db, filter, {
     sort: { work_date: -1, created_at: -1 },
     limit,
   });
+
   jsonResponse(res, { success: true, data: rows });
 }));
 
@@ -607,6 +736,7 @@ router.post('/deliveries', requireAuth, asyncHandler(async (req, res) => {
 
   const result = await req.db.collection('deliveries').insertOne(fields);
   const id = String(result.insertedId);
+
   await createAutoNotifications(req.db, id, fields);
 
   jsonResponse(res, { success: true, id }, 201);
@@ -618,6 +748,7 @@ router.put('/deliveries/:id', requireAuth, asyncHandler(async (req, res) => {
 
   const oldDoc = await req.db.collection('deliveries').findOne({ _id: oid });
   const old = mongoToPlain(oldDoc);
+
   if (!old) return jsonResponse(res, { success: false, message: 'ไม่พบรายการ' }, 404);
 
   if ((req.user.role || '') !== 'owner' && String(old.user_id) !== String(req.user.id)) {
@@ -627,6 +758,7 @@ router.put('/deliveries/:id', requireAuth, asyncHandler(async (req, res) => {
   const data = req.body || {};
   const workDate = parseDateOrNull(data.work_date || old.work_date) || old.work_date || new Date().toISOString().slice(0, 10);
   const vehicleId = await resolveVehicleId(req.db, req.user, data) || old.vehicle_id || null;
+
   const fields = {
     vehicle_id: vehicleId,
     work_date: workDate,
@@ -658,6 +790,7 @@ router.delete('/deliveries/:id', requireAuth, asyncHandler(async (req, res) => {
 
   const oldDoc = await req.db.collection('deliveries').findOne({ _id: oid });
   const old = mongoToPlain(oldDoc);
+
   if (!old) return jsonResponse(res, { success: false, message: 'ไม่พบรายการ' }, 404);
 
   if ((req.user.role || '') !== 'owner' && String(old.user_id) !== String(req.user.id)) {
@@ -681,6 +814,7 @@ router.post('/deliveries/:id/upload', requireAuth, (req, res, next) => {
 }, asyncHandler(async (req, res) => {
   const id = String(req.params.id || '');
   const oid = oidOrNull(id);
+
   if (!oid) {
     if (req.file) fs.unlinkSync(req.file.path);
     return jsonResponse(res, { success: false, message: 'id ไม่ถูกต้อง' }, 422);
@@ -688,6 +822,7 @@ router.post('/deliveries/:id/upload', requireAuth, (req, res, next) => {
 
   const oldDoc = await req.db.collection('deliveries').findOne({ _id: oid });
   const old = mongoToPlain(oldDoc);
+
   if (!old) {
     if (req.file) fs.unlinkSync(req.file.path);
     return jsonResponse(res, { success: false, message: 'ไม่พบรายการ' }, 404);
@@ -703,6 +838,7 @@ router.post('/deliveries/:id/upload', requireAuth, (req, res, next) => {
   }
 
   const relative = `/uploads/${req.file.filename}`;
+
   await req.db.collection('deliveries').updateOne(
     { _id: oid },
     { $set: { receipt_photo: relative, updated_at: nowIso() } }
@@ -750,8 +886,10 @@ router.get('/dashboard/stats', requireAuth, asyncHandler(async (req, res) => {
     summary.total_amount += amount;
     summary.total_distance += distance;
     summary.total_fuel_used += fuel;
+
     if ((row.payment_status || 'pending') === 'pending') summary.pending_payments += 1;
     if (!row.receipt_photo) summary.missing_photos += 1;
+
     if (liters > 0) {
       priceSum += amount / liters;
       priceCount += 1;
@@ -809,10 +947,12 @@ router.get('/dashboard/stats', requireAuth, asyncHandler(async (req, res) => {
 
 router.get('/notifications', requireAuth, asyncHandler(async (req, res) => {
   let filter = {};
+
   if ((req.user.role || '') !== 'owner') {
     const deliveries = await req.db.collection('deliveries')
       .find({ user_id: String(req.user.id) }, { projection: { _id: 1 } })
       .toArray();
+
     const deliveryIds = deliveries.map((d) => String(d._id));
     filter = {
       $or: [
@@ -862,17 +1002,32 @@ app.use((req, res) => {
 
 app.use((err, _req, res, _next) => {
   console.error(err);
+
   const status = err.status || 500;
-  const isDbError = String(err.name || '').toLowerCase().includes('mongo') || String(err.message || '').includes('Mongo');
+  const message = String(err.message || '');
+
+  if (message.includes('CORS blocked origin')) {
+    return jsonResponse(res, {
+      success: false,
+      message: 'CORS ไม่อนุญาต origin นี้',
+      detail: message,
+    }, 403);
+  }
+
+  const isDbError = String(err.name || '').toLowerCase().includes('mongo') || message.includes('Mongo');
+
   jsonResponse(res, {
     success: false,
     message: isDbError ? 'Database error' : 'Server error',
-    detail: err.message,
+    detail: message,
   }, status);
 });
 
 const server = app.listen(config.port, '0.0.0.0', () => {
   console.log(`OilOps Node API running on port ${config.port}`);
+  console.log(`MongoDB DB: ${config.mongodb.db}`);
+  console.log(`CORS allow all: ${config.corsAllowAll ? 'yes' : 'no'}`);
+  console.log(`Allowed origins: ${config.corsAllowedOrigins.join(', ') || '-'}`);
 });
 
 async function shutdown() {

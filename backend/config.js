@@ -1,40 +1,48 @@
 require('dotenv').config();
 
-function envValue(key, defaultValue = '') {
-  const value = process.env[key];
-  if (value === undefined || value === null || String(value).trim() === '') {
-    return defaultValue;
-  }
+function env(name, fallback = '') {
+  const value = process.env[name];
+  if (value === undefined || value === null || String(value).trim() === '') return fallback;
   return String(value).trim();
 }
 
-function intValue(key, defaultValue) {
-  const n = Number.parseInt(envValue(key, String(defaultValue)), 10);
-  return Number.isFinite(n) ? n : defaultValue;
+function envNumber(name, fallback) {
+  const value = Number(env(name, ''));
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-const extraOrigins = envValue('CORS_ALLOWED_ORIGINS', '')
-  .split(',')
-  .map((item) => item.trim())
-  .filter(Boolean);
+function splitOrigins(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const defaultOrigins = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+];
 
 module.exports = {
-  port: intValue('PORT', 4000),
+  port: envNumber('PORT', 10000),
+
   mongodb: {
-    uri: envValue('MONGODB_URI', ''),
-    db: envValue('MONGODB_DB', 'oil_management_system'),
+    uri: env('MONGODB_URI', env('MONGODB', '')),
+    db: env('MONGODB_DB', 'oil_management_system'),
   },
-  jwtSecret: envValue('JWT_SECRET', '4b9b89629ed5b3b6b9bb876821aaab38'),
-  jwtExpireSeconds: intValue('JWT_EXPIRE_SECONDS', 60 * 60 * 24 * 7),
-  uploadMaxMb: intValue('UPLOAD_MAX_MB', 5),
-  corsAllowAll: envValue('CORS_ALLOW_ALL', 'true') === 'true',
+
+  jwtSecret: env('JWT_SECRET', 'CHANGE_THIS_SECRET_FOR_PRODUCTION_2026'),
+  jwtExpireSeconds: envNumber('JWT_EXPIRE_SECONDS', 60 * 60 * 24 * 7),
+
+  uploadMaxMb: envNumber('UPLOAD_MAX_MB', 5),
+
   corsAllowedOrigins: Array.from(new Set([
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'http://localhost',
-    'http://127.0.0.1',
-    'https://oil-management-system.onrender.com',
-    'https://oil-management-backend.onrender.com',
-    ...extraOrigins,
+    ...defaultOrigins,
+    ...splitOrigins(env('CORS_ALLOWED_ORIGINS', '')),
+    ...splitOrigins(env('FRONTEND_URL', '')),
   ])),
+
+  corsAllowAll: ['1', 'true', 'yes', 'on'].includes(env('CORS_ALLOW_ALL', 'false').toLowerCase()),
 };
