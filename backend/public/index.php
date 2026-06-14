@@ -501,7 +501,7 @@ try {
         json_response([
             'success' => true,
             'message' => 'pong',
-            'build' => 'index-render-fixed-v3',
+            'build' => 'index-render-fixed-v4',
             'route' => $path,
             'time' => date('c'),
         ]);
@@ -515,7 +515,7 @@ try {
         json_response([
             'success' => true,
             'message' => 'Backend connected to MongoDB successfully',
-            'build' => 'index-render-fixed-v3',
+            'build' => 'index-render-fixed-v4',
             'database' => getenv('MONGODB_DB') ?: (($config['mongodb']['db'] ?? null) ?: ($config['mongo']['db'] ?? 'oil_management_system')),
             'route' => $path,
             'time' => date('c'),
@@ -526,9 +526,18 @@ try {
         json_response([
             'success' => true,
             'name' => 'OilOps PHP API MongoDB',
-            'build' => 'index-render-fixed-v3',
+            'build' => 'index-render-fixed-v4',
             'time' => date('c'),
             'endpoints' => ['/ping', '/health', '/auth/login', '/auth/me', '/deliveries', '/dashboard/stats', '/notifications', '/users', '/vehicles'],
+        ]);
+    }
+
+    if ($path === '/auth/login' && $method === 'GET') {
+        json_response([
+            'success' => true,
+            'message' => 'auth/login route found. Use POST with username and password to login.',
+            'build' => 'index-render-fixed-v4',
+            'route' => $path,
         ]);
     }
 
